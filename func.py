@@ -2,23 +2,30 @@ import io
 import os
 import json
 import logging
-from typing import Dict, Optional
+import re
+from typing import Dict, List, Optional
 from aggregation import create_minutely_buckets
+from delivery import DeliveryError, send_lines
 from dynatrace_client import DynatraceClient
 from mint import MintMetric
 from summary_stat import SummaryStat
 from metric_mapping import namespace_map
 from urllib.parse import quote
-import requests
 
 
-def process_metrics(body: Dict):
-    logging.getLogger().info(f"process_metrics: {body}")
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    return default if value is None else value.strip().lower() == "true"
+
+
+def process_metrics(body: Dict) -> List[str]:
+    """Turn one OCI Monitoring payload into MINT lines. Nothing is sent from here."""
+    logging.getLogger().debug(f"process_metrics: {body}")
 
     namespace = body.get("namespace")
     metric_name = body.get("name")
 
-    oci_dimensions: Dict[str, str] = body.get("dimensions", {})
+    oci_dimensions: Dict[str, str] = dict(body.get("dimensions") or {})
 
     # Include the resourceGroup and compartmentId in oci_dimensions so they can be mapped using the dimension_mapping
     oci_dimensions["resourceGroup"] = body.get("resourceGroup")
@@ -26,9 +33,10 @@ def process_metrics(body: Dict):
 
     datapoints = body.get("datapoints")
 
-    import_all_metrics = True if os.environ["IMPORT_ALL_METRICS"].lower() == "true" else False
-    logging.getLogger().info(f"import_all_metrics: {import_all_metrics}")
+    import_all_metrics = _env_bool("IMPORT_ALL_METRICS")
+    logging.getLogger().debug(f"import_all_metrics: {import_all_metrics}")
 
+    lines: List[str] = []
     if import_all_metrics:
         key_namespace = namespace.replace("oci_", "")
         key = f"cloud.oci.{key_namespace}.{metric_name}"
@@ -50,15 +58,15 @@ def process_metrics(body: Dict):
                 },
                 timestamp * 1000,
             )
-            logging.getLogger().info(f"mint_metric: {mint_metric}")
-            push_metrics_to_dynatrace(mint_metric)
+            logging.getLogger().debug(f"mint_metric: {mint_metric}")
+            lines.append(str(mint_metric))
     else:
         metric_map = namespace_map.get(namespace)
         if metric_map is None:
             logging.getLogger().error(
                 f"Could not find a metric mapping for namespace '{namespace}'"
             )
-            return
+            return lines
         if value_or_none := metric_map.value_from_oci_metric_name(
             metric_name, oci_dimensions, datapoints
         ):
@@ -66,69 +74,79 @@ def process_metrics(body: Dict):
             dimensions = metric_map.dimensions(oci_dimensions)
 
             for result in results:
-                mint_metric = MintMetric(
+                lines.append(str(MintMetric(
                     dynatrace_metric_key,
                     result.value,
                     dimensions,
                     result.timestamp * 1000,
-                )
-            logging.getLogger().info(f"process_metrics: Mint Metric: {mint_metric}")
-            push_metrics_to_dynatrace(mint_metric)
+                )))
+            # Historical behaviour: only the most recent minute of a payload is sent for curated
+            # namespaces. CURATED_SEND_ALL_BUCKETS=true sends every minute (see CHANGES.md).
+            if not _env_bool("CURATED_SEND_ALL_BUCKETS"):
+                lines = lines[-1:]
+            for line in lines:
+                logging.getLogger().debug(f"process_metrics: Mint Metric: {line}")
         else:
             logging.getLogger().debug(
                 f"Could not find a mapping for metric '{metric_name}' in namespace '{namespace}'"
             )
-            return
-
-METRIC_INGEST_ENDPOINT = "/api/v2/metrics/ingest"
+    return lines
 
 
-def push_metrics_to_dynatrace(mint_metric: MintMetric):
+def build_client() -> DynatraceClient:
+    """Create the Dynatrace client from the function configuration. Raises ValueError if it is incomplete."""
     try:
         tenant_url = os.environ["DYNATRACE_TENANT"]
-        # Remove the trailing slash if it exits
-        if tenant_url.endswith("/"):
-            tenant_url = tenant_url[:-1]
-        client = DynatraceClient(tenant_url)
-
         auth_method = os.environ["AUTH_METHOD"]
+    except KeyError as ex:
+        raise ValueError(f"Missing configuration value {ex}") from None
+
+    proxy_url = create_proxy_connection()
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    client = DynatraceClient(tenant_url, proxies=proxies)
+    try:
         if auth_method == "oauth":
-            client_id = os.environ["OAUTH_CLIENT_ID"]
-            client_secret = os.environ["OAUTH_CLIENT_SECRET"]
-            account_urn = os.environ["OAUTH_ACCOUNT_URN"]
-            client.using_oauth(client_id, client_secret, account_urn)
-        elif auth_method == "token":
-            api_token = os.environ["DYNATRACE_API_KEY"]
-            client.using_api_token(api_token)
-        else:
-            logging.getLogger().error(
-                f"Invalid authentication method '{auth_method}'. Expected either 'oauth' or 'token'"
+            client.using_oauth(
+                os.environ["OAUTH_CLIENT_ID"],
+                os.environ["OAUTH_CLIENT_SECRET"],
+                os.environ["OAUTH_ACCOUNT_URN"],
             )
+        elif auth_method == "token":
+            client.using_api_token(os.environ["DYNATRACE_API_KEY"])
+        else:
+            raise ValueError(f"Invalid authentication method '{auth_method}'. Expected either 'oauth' or 'token'")
+    except KeyError as ex:
+        raise ValueError(f"Missing configuration value {ex} for AUTH_METHOD '{auth_method}'") from None
+    return client
 
-        proxy_url = create_proxy_connection()
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        logging.getLogger().info(f"Using proxies: {proxies}")
-        client.send_mint_metric(str(mint_metric), proxies)
-    except (Exception, ValueError) as ex:
-        logging.getLogger().error(str(ex))
+
+_PLACEHOLDER = re.compile(r"^<.*>$")
 
 
-def create_proxy_connection() -> Optional[Dict[str, str]]:
-    proxy_address = os.environ.get("PROXY_URL", None)
-    proxy_username = os.environ.get("PROXY_USERNAME", None)
-    proxy_password = os.environ.get("PROXY_PASSWORD", None)
+def _env_value(name: str) -> Optional[str]:
+    """An environment value, or None when it is empty or still the "<placeholder>" from func.yaml."""
+    value = (os.environ.get(name) or "").strip()
+    return None if not value or _PLACEHOLDER.match(value) else value
 
+
+def create_proxy_connection() -> Optional[str]:
+    """Return the proxy URL including credentials, or None when no usable PROXY_URL is configured."""
+    proxy_address = _env_value("PROXY_URL")
+    proxy_username = _env_value("PROXY_USERNAME")
+    proxy_password = _env_value("PROXY_PASSWORD")
+
+    # An empty value or the untouched func.yaml placeholder ("<Proxy URL>") means "no proxy".
     if proxy_address is None:
         return None
+    if "://" not in proxy_address:
+        logging.getLogger().error("PROXY_URL is not of the form <protocol>://<host>:<port>; ignoring it")
+        return None
 
-    if proxy_address:
-        protocol, address = proxy_address.split("://")
-        proxy_url = f"{protocol}://"
-        proxy_url += _create_user_pass_url(proxy_username, proxy_password)
-        proxy_url += f"{address}"
-        return proxy_url
-
-    return None
+    protocol, address = proxy_address.split("://", 1)
+    proxy_url = f"{protocol}://"
+    proxy_url += _create_user_pass_url(proxy_username, proxy_password)
+    proxy_url += f"{address}"
+    return proxy_url
 
 
 def _create_user_pass_url(proxy_username: str, proxy_password: str) -> str:
@@ -144,18 +162,44 @@ def _create_user_pass_url(proxy_username: str, proxy_password: str) -> str:
 
 
 def handler(ctx, data: io.BytesIO = None):
-    log_level = str(os.environ["LOG_LEVEL"])
-    logging.getLogger().setLevel(log_level.upper())
+    logging.getLogger().setLevel(str(os.environ.get("LOG_LEVEL", "INFO")).upper())
 
     try:
-        logging.getLogger().info(data.getvalue())
-        body = json.loads(data.getvalue())
-        if isinstance(body, list):
-            # Batch of CloudEvents format
-            for b in body:
-                process_metrics(b)
-        else:
-            # Single CloudEvent
-            process_metrics(body)
+        raw = data.getvalue()
+        logging.getLogger().debug(raw)
+        body = json.loads(raw)
     except (Exception, ValueError) as ex:
-        logging.getLogger().error(str(ex))
+        # A payload that cannot be parsed will never parse: do not make Connector Hub redeliver it.
+        logging.getLogger().error(f"Could not parse the request body: {ex}")
+        return
+
+    # Batch of CloudEvents format, or a single CloudEvent
+    items = body if isinstance(body, list) else [body]
+
+    lines: List[str] = []
+    invalid_items = 0
+    for item in items:
+        try:
+            lines.extend(process_metrics(item))
+        except Exception as ex:  # one bad metric must not drop the rest of the batch
+            invalid_items += 1
+            logging.getLogger().error(f"Skipping metric that could not be processed: {type(ex).__name__}: {ex}")
+    logging.getLogger().info(f"parsed: items={len(items)} invalid_items={invalid_items} lines={len(lines)}")
+
+    if not lines:
+        return
+
+    if _env_bool("DRY_RUN"):
+        for line in lines:
+            logging.getLogger().info(f"DRY_RUN {line}")
+        return
+
+    try:
+        client = build_client()
+    except ValueError as ex:
+        logging.getLogger().error(f"Cannot send metrics: {ex}")
+        return
+
+    # Raises DeliveryError when a chunk still failed with a transient error (429/5xx/timeout) after the
+    # retries, so the invocation fails and Connector Hub redelivers the batch.
+    send_lines(lines, client)

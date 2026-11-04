@@ -68,6 +68,31 @@ Using an OAuth2 client for the OCI functions will require you to add some additi
 ![alt text](images/oauth/image-8.png)
 10. Finally click on **Create Client** at the bottom of the page and copy the `client_id`, `client_secret` and `urn` for use with the OCI function.  
 
+## Delivery behaviour and settings
+The function collects every metric in a Connector Hub batch and posts them to Dynatrace in as few requests as possible.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `DRY_RUN` | `false` | `true` logs the MINT lines instead of sending them. No Dynatrace credentials are needed. |
+| `MAX_PAYLOAD_BYTES` | `900000` | Maximum size of one request (the API limit is 1 MB). |
+| `MAX_LINES_PER_REQUEST` | `500` | Maximum number of lines in one request. |
+| `RETRY_BUDGET_SECONDS` | `45` | Total time spent retrying 429 / 5xx / timeouts per invocation. |
+| `CURATED_SEND_ALL_BUCKETS` | `false` | Curated namespaces send only the latest minute of each payload (historical behaviour). `true` sends all minutes. |
+| `LOG_LEVEL` | `INFO` | `DEBUG` also logs every payload and MINT line. |
+
+Errors are handled as follows. Connector Hub delivers at-least-once and does not send later batches until the function succeeds, but Dynatrace drops metrics older than one hour, so retries are bounded:
+- 429, 5xx and timeouts are retried (up to 3 attempts per request, within `RETRY_BUDGET_SECONDS`). Every request of the batch is attempted. If any still failed, the function raises at the end so Connector Hub redelivers the batch.
+- Other 4xx responses (for example a rejected line or a wrong token) are logged with the status and response body, and are not retried.
+
+The function timeout is set to 120 seconds in `func.yaml`.
+
+## Running the tests
+```
+pip install -r requirements-dev.txt
+pytest
+```
+The tests do not make network calls.
+
 ## Debugging 
 If you are running into issues getting the connector to work, go to the application and enable **Function Invocation Logs**.
 ![alt text](images/image-12.png)

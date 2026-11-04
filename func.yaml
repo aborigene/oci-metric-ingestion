@@ -1,11 +1,12 @@
 schema_version: 20180708
 name: oci-metric-ingestion
-version: 0.0.1
+version: 0.1.0
 runtime: python
 build_image: fnproject/python:3.11-dev
 run_image: fnproject/python:3.11
 entrypoint: /python/bin/fdk /function/func.py handler
 memory: 256
+timeout: 120 # seconds; delivery may retry for up to RETRY_BUDGET_SECONDS (45s) before giving up
 config:
   DYNATRACE_TENANT: <Tenant URL>
 
@@ -30,4 +31,20 @@ config:
   # cloud.oci.<oci namespace with the 'oci_' prefix removed>.<metric name>
   # Ex: "CpuUtilization" from namespace "oci_computeagent" -> "cloud.oci.computeagent.CpuUtilization"  
   IMPORT_ALL_METRICS: "False"
+  # DEBUG logs every payload and MINT line (very verbose). Defaults to INFO when unset.
   LOG_LEVEL: "INFO"
+
+  # Optional - delivery tuning. All values below are the defaults and may be removed.
+  # Set to "true" to log the MINT lines instead of sending them to Dynatrace (no credentials needed).
+  DRY_RUN: "false"
+  # Maximum size of one ingest request in bytes (the Dynatrace API limit is 1 MB).
+  MAX_PAYLOAD_BYTES: "900000"
+  # Maximum number of lines in one ingest request.
+  MAX_LINES_PER_REQUEST: "500"
+  # Total time in seconds spent retrying 429 / 5xx / timeouts per invocation. Dynatrace drops metrics
+  # older than one hour, so do not make this large. After the budget the invocation fails and
+  # Connector Hub redelivers the batch.
+  RETRY_BUDGET_SECONDS: "45"
+  # Curated namespaces historically send only the most recent minute of every payload. Set to "true" to send
+  # every minute in the payload (more lines, same series, no gaps). See CHANGES.md.
+  CURATED_SEND_ALL_BUCKETS: "false"
