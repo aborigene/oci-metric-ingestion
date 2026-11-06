@@ -112,10 +112,15 @@ def normalise_dimensions(body: Dict) -> Dict[str, str]:
     return result
 
 
-def process_generic(body: Dict) -> List[str]:
-    """MINT lines (min/max/sum/count per minute) for a metric of an unmapped namespace."""
+def process_generic(body: Dict, enricher=None) -> List[str]:
+    """MINT lines (min/max/sum/count per minute) for a metric of an unmapped namespace.
+
+    `enricher` (see enrichment.py) adds resolved names; names are only read from its memo here, never looked up.
+    """
     key = generic_metric_key(body.get("namespace") or "", body.get("name"))
     dimensions = normalise_dimensions(body)
+    if enricher is not None:
+        dimensions = enricher.apply(body, dimensions)
 
     lines: List[str] = []
     for timestamp, values in sorted(create_minutely_buckets(body.get("datapoints")).items()):

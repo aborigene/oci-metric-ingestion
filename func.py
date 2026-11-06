@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 from delivery import DeliveryError, send_lines
 from filtering import CompartmentFilter, FilterStats
 from generic import process_generic
+from enrichment import get_enricher
+from vault import SecretProvider
 from dynatrace_client import DynatraceClient
 from mint import MintMetric
 from metric_mapping import namespace_map
@@ -30,11 +32,16 @@ def _log_skipped_namespace_once(namespace):
         )
 
 
-def process_metrics(body: Dict) -> List[str]:
+def _is_generic(item) -> bool:
+    return isinstance(item, dict) and item.get("namespace") not in namespace_map and _env_bool("IMPORT_ALL_METRICS")
+
+
+def process_metrics(body: Dict, enricher=None) -> List[str]:
     """Turn one OCI Monitoring payload into MINT lines. Nothing is sent from here.
 
     Routing: a namespace in namespace_map always takes the curated path; any other namespace takes the generic
     path only when IMPORT_ALL_METRICS is true, otherwise it is skipped (logged once per namespace).
+    `enricher` only affects the generic path (names are read from its memo; see handler for the lookups).
     """
     logging.getLogger().debug(f"process_metrics: {body}")
 
@@ -49,7 +56,7 @@ def process_metrics(body: Dict) -> List[str]:
         if not _env_bool("IMPORT_ALL_METRICS"):
             _log_skipped_namespace_once(namespace)
             return []
-        return process_generic(body)
+        return process_generic(body, enricher)
 
     # Curated namespaces always use the curated path, with or without IMPORT_ALL_METRICS.
     oci_dimensions: Dict[str, str] = dict(body.get("dimensions") or {})
@@ -96,15 +103,19 @@ def build_client() -> DynatraceClient:
     proxy_url = create_proxy_connection()
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
     client = DynatraceClient(tenant_url, proxies=proxies)
+    # Optional: the token (AUTH_METHOD=token) or the OAuth client secret (AUTH_METHOD=oauth) lives in OCI Vault.
+    secret_ocid = _env_value("DYNATRACE_SECRET_OCID")
+    provider = SecretProvider(secret_ocid) if secret_ocid else None
     try:
         if auth_method == "oauth":
             client.using_oauth(
                 os.environ["OAUTH_CLIENT_ID"],
-                os.environ["OAUTH_CLIENT_SECRET"],
+                None if provider else os.environ["OAUTH_CLIENT_SECRET"],
                 os.environ["OAUTH_ACCOUNT_URN"],
+                secret_provider=provider,
             )
         elif auth_method == "token":
-            client.using_api_token(os.environ["DYNATRACE_API_KEY"])
+            client.using_api_token(None if provider else os.environ["DYNATRACE_API_KEY"], secret_provider=provider)
         else:
             raise ValueError(f"Invalid authentication method '{auth_method}'. Expected either 'oauth' or 'token'")
     except KeyError as ex:
@@ -170,7 +181,7 @@ def handler(ctx, data: io.BytesIO = None):
 
     compartment_filter = CompartmentFilter.from_env()
     filtered = FilterStats()
-    lines: List[str] = []
+    accepted: List[Dict] = []
     invalid_items = 0
     for item in items:
         try:
@@ -179,7 +190,26 @@ def handler(ctx, data: io.BytesIO = None):
                 if not keep:
                     filtered.add(item.get("compartmentId"), reason)
                     continue
-            lines.extend(process_metrics(item))
+            accepted.append(item)
+        except Exception as ex:
+            invalid_items += 1
+            logging.getLogger().error(f"Skipping metric that could not be processed: {type(ex).__name__}: {ex}")
+
+    # Names are resolved for the whole batch BEFORE any line is built, so they are present on first sighting.
+    # This only concerns the generic path; a failure here never blocks ingest.
+    enricher = None
+    if _env_bool("IMPORT_ALL_METRICS"):
+        try:
+            enricher = get_enricher()
+            if enricher:
+                enricher.prepare([i for i in accepted if _is_generic(i)])
+        except Exception as ex:
+            logging.getLogger().warning(f"Name enrichment skipped: {type(ex).__name__}: {ex}")
+
+    lines: List[str] = []
+    for item in accepted:
+        try:
+            lines.extend(process_metrics(item, enricher))
         except Exception as ex:  # one bad metric must not drop the rest of the batch
             invalid_items += 1
             logging.getLogger().error(f"Skipping metric that could not be processed: {type(ex).__name__}: {ex}")

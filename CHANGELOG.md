@@ -20,6 +20,9 @@
 
 ### Improved in this version:
 
+- Namespaces ingested with `IMPORT_ALL_METRICS` now get `oci.compartment_name` and, for registered namespaces (`oci_streaming` out of the box), `oci.resource_display_name`, resolved with the OCI Search service. Lookups are batched per invocation, cached in memory and protected against OCI API throttling. A failed lookup falls back to the OCID and never blocks ingestion. Needs IAM policies, see the README. Switch off with `ENRICH_NAMES=false`
+- The Dynatrace token or OAuth client secret can be read from OCI Vault (`DYNATRACE_SECRET_OCID`)
+- The function now uses 512 MB of memory (the OCI SDK is added to `requirements.txt`)
 - New `COMPARTMENT_ALLOWLIST` / `COMPARTMENT_DENYLIST` settings to ingest only the compartments you want. Off by default
 - New `DRY_RUN`, `MAX_PAYLOAD_BYTES`, `MAX_LINES_PER_REQUEST`, `RETRY_BUDGET_SECONDS` and `CURATED_SEND_ALL_BUCKETS` settings
 - The function timeout is now 120 seconds

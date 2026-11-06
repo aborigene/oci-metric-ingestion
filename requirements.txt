@@ -1,3 +1,4 @@
 fdk>=0.1.83
 requests
+oci>=2.100.0
 setuptools>=70.0.0

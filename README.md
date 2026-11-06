@@ -94,6 +94,61 @@ Null, empty and `None` values are omitted. Values are cut at 255 characters, key
 
 **Key prefix warning.** The extension's topology and OpenPipeline rules match metric keys by prefix (for example `cloud.oci.compute*`). A generic namespace whose name starts with the same prefix, such as `oci_computecontainerinstance`, is matched by the compute rules as well. The function logs a warning once per such namespace.
 
+## Names for resources and compartments (name enrichment)
+OCI metrics carry OCIDs only. For namespaces ingested through `IMPORT_ALL_METRICS`, the function adds two dimensions so the data is readable (and so a Smartscape node can be named):
+
+| Dimension | Added for | Source |
+|---|---|---|
+| `oci.compartment_name` | every generic metric | OCI Search, `query compartment resources` |
+| `oci.resource_display_name` | namespaces in the registry (`oci_streaming` out of the box) | OCI Search, one query per compartment and resource type |
+
+- If the metric already has a `resourceDisplayName`, it is used and the lookup is skipped.
+- The name is looked up **before** the metrics are sent, so it is present from the first metric.
+- When a name cannot be resolved (missing permission, throttling, the circuit breaker is open) the **OCID is used as the name** and a warning with counters (`hits`, `misses`, `calls`, `failures`, `breaker`) is logged. Ingestion is never blocked.
+- Names are dimensions. If a name changes (or is first the OCID and later resolved), the metric continues under a new series for that name. Query by `oci.resource_id` when you need continuity.
+- Curated namespaces are not enriched, their output does not change.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ENRICH_NAMES` | `true` | `false` disables enrichment completely (the OCI SDK is not even loaded). |
+| `ENRICHMENT_REGISTRY_JSON` | not set | Add or override namespaces, see below. |
+| `NAME_CACHE_TTL_SECONDS` | `900` | How long a name is remembered (+/-20% jitter). |
+| `NAME_CACHE_NEGATIVE_TTL_SECONDS` | `120` | How long "not found" or "lookup failed" is remembered. |
+| `NAME_CACHE_MAX_ENTRIES` | `10000` | Memo size; the oldest entries are dropped first. |
+| `MAX_LOOKUP_CALLS_PER_INVOCATION` | `5` | OCI Search calls (including result pages) per invocation. |
+| `MAX_LOOKUP_SECONDS_PER_INVOCATION` | `10` | Time budget for lookups per invocation. |
+
+How lookups stay cheap and safe (the OCI APIs are throttled per tenancy, the limits are not published and a 429 has no `Retry-After`):
+- One paginated search per region, compartment and resource type, per invocation. **All** resources it returns are remembered, not only the ones asked for, so a second stream in the same compartment costs nothing. Compartment names use one search per region.
+- The memo lives in the container's memory only. A cold start simply looks the names up again. Nothing is stored anywhere.
+- Only one lookup per group runs at a time. After 3 consecutive 429 / 5xx / timeouts, lookups pause for 60 seconds, then 120, doubling up to 600. SDK calls retry at most 3 times within 10 seconds, with jittered exponential backoff.
+
+**Registry.** `ENRICHMENT_REGISTRY_JSON` maps a namespace to `resource_type`, `id_dimension` (default `resourceId`), `name_dimension` (default `oci.resource_display_name`) and optionally `query`. A field overrides only that field, `null` removes a namespace, and a new namespace needs `resource_type`:
+```
+{"oci_queue": {"resource_type": "queue"}, "oci_streaming": {"name_dimension": "oci.stream_name"}}
+```
+The Search query text and resource type names are not verified against a live tenancy (see "Not verified"). Test one with `oci search resource structured-search --query-text "query stream resources where compartmentId = '<ocid>'"` and fix it through `query` / `resource_type` if needed, no code change is required.
+
+### IAM policies
+The function authenticates to OCI with its resource principal. Create a dynamic group for the function and policies, for example (adapt names and scopes; these statements are a starting point and were **not verified against a live tenancy**):
+```
+Dynamic group:  ALL {resource.type = 'fnfunc', resource.compartment.id = '<function compartment OCID>'}
+
+Allow dynamic-group <dynamic group> to inspect compartments in tenancy
+Allow dynamic-group <dynamic group> to inspect stream-family in tenancy
+Allow dynamic-group <dynamic group> to use search-resources in tenancy
+```
+Add one `inspect <resource family> in tenancy` statement per namespace you add to the registry. Search only returns resources the caller may see. If the logs show `NotAuthorizedOrNotFound`, names fall back to OCIDs until the policy is fixed.
+
+For Vault (`DYNATRACE_SECRET_OCID`), also (also unverified):
+```
+Allow dynamic-group <dynamic group> to read secret-bundles in compartment <vault compartment> where target.secret.id = '<secret OCID>'
+```
+With `AUTH_METHOD=token` the secret content is the API token; with `AUTH_METHOD=oauth` it is the OAuth client secret (`OAUTH_CLIENT_ID` and `OAUTH_ACCOUNT_URN` stay in `func.yaml`). The value is read once, cached, and read again after a 401 (token) or a rejected client secret (OAuth). It is never logged.
+
+### Memory and timeout
+Name enrichment and Vault use the OCI SDK, so `func.yaml` now sets **512 MB** of memory (it was 256) and a **120 second** timeout. If you deploy with your own settings, keep at least these values.
+
 ## Choosing which compartments are ingested
 Large tenancies often contain compartments (dev, QA, ...) that should not be sent to Dynatrace. From cheapest to most flexible:
 

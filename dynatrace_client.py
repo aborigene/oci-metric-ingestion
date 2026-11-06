@@ -50,14 +50,16 @@ class OAuthAuth:
     def __init__(
         self,
         client_id: str,
-        client_secret: str,
+        client_secret: Optional[str],
         urn: str,
         session: Optional[requests.Session] = None,
         proxies: Optional[Dict[str, str]] = None,
         clock: Callable[[], float] = time.time,
+        secret_provider=None,
     ):
         self._client_id = client_id
         self._client_secret = client_secret
+        self._secret_provider = secret_provider  # reads the client secret from OCI Vault when set
         self._urn = urn
         self._session = session or get_session()
         self._proxies = proxies
@@ -84,7 +86,7 @@ class OAuthAuth:
         data = {
             "grant_type": "client_credentials",
             "client_id": self._client_id,
-            "client_secret": self._client_secret,
+            "client_secret": self._secret_provider.get() if self._secret_provider else self._client_secret,
             "resource": self._urn,
             "scope": OAUTH_SCOPE,
         }
@@ -99,6 +101,8 @@ class OAuthAuth:
         except requests.RequestException as ex:
             raise AuthError(f"OAuth token request failed: {type(ex).__name__}", transient=True) from ex
         if response.status_code != 200:
+            if self._secret_provider and response.status_code in (400, 401):
+                self._secret_provider.invalidate()  # the secret may have been rotated: read it again next time
             transient = response.status_code == 429 or response.status_code >= 500
             # The body of a failed token request does not contain secrets; the request body (which does) is never logged.
             raise AuthError(
@@ -110,14 +114,17 @@ class OAuthAuth:
 
 
 class ApiTokenAuth:
-    def __init__(self, api_token: str):
+    def __init__(self, api_token: Optional[str], secret_provider=None):
         self._api_token = api_token
+        self._secret_provider = secret_provider  # reads the token from OCI Vault when set
 
     def authorization_header(self) -> str:
-        return f"Api-Token {self._api_token}"
+        token = self._secret_provider.get() if self._secret_provider else self._api_token
+        return f"Api-Token {token}"
 
     def invalidate(self):
-        pass
+        if self._secret_provider:
+            self._secret_provider.invalidate()  # a 401 may mean the token was rotated: read it again
 
 
 class DynatraceClient:
@@ -129,12 +136,13 @@ class DynatraceClient:
         self._proxies = proxies
         self._auth = None
 
-    def using_oauth(self, client_id: str, client_secret: str, urn: str, clock: Callable[[], float] = time.time):
-        self._auth = OAuthAuth(client_id, client_secret, urn, self._session, self._proxies, clock)
+    def using_oauth(self, client_id: str, client_secret: Optional[str], urn: str,
+                    clock: Callable[[], float] = time.time, secret_provider=None):
+        self._auth = OAuthAuth(client_id, client_secret, urn, self._session, self._proxies, clock, secret_provider)
         return self
 
-    def using_api_token(self, api_token: str):
-        self._auth = ApiTokenAuth(api_token)
+    def using_api_token(self, api_token: Optional[str], secret_provider=None):
+        self._auth = ApiTokenAuth(api_token, secret_provider)
         return self
 
     def invalidate_token(self):

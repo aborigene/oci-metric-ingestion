@@ -1,11 +1,11 @@
 schema_version: 20180708
 name: oci-metric-ingestion
-version: 0.1.0
+version: 0.2.0
 runtime: python
 build_image: fnproject/python:3.11-dev
 run_image: fnproject/python:3.11
 entrypoint: /python/bin/fdk /function/func.py handler
-memory: 256
+memory: 512 # MB; the OCI SDK (name enrichment, Vault) needs more than the previous 256
 timeout: 120 # seconds; delivery may retry for up to RETRY_BUDGET_SECONDS (45s) before giving up
 config:
   DYNATRACE_TENANT: <Tenant URL>
@@ -57,3 +57,23 @@ config:
   # Optional - never ingest metrics from these compartments. Takes precedence over COMPARTMENT_ALLOWLIST.
   # COMPARTMENT_DENYLIST: ocid1.compartment.oc1..cccc
   # Note: all OCI Function configuration values together are limited to 4 KB (about 30-40 OCIDs).
+
+  # Optional - Name enrichment (only for namespaces ingested through IMPORT_ALL_METRICS).
+  # Adds oci.resource_display_name (for registered namespaces, by default oci_streaming) and oci.compartment_name,
+  # looked up with the OCI Search service using the function's resource principal. See the README (IAM policies).
+  # On any lookup failure the OCID is used as the name and ingestion continues.
+  # Set to "false" to switch enrichment off entirely.
+  ENRICH_NAMES: "true"
+  # Optional - add or change namespaces that get their names resolved. JSON, see registry.py. Example:
+  # ENRICHMENT_REGISTRY_JSON: '{"oci_queue": {"resource_type": "queue"}}'
+  # How long a resolved name is remembered (seconds, +/-20% jitter), a name that was not found, and the memo size.
+  NAME_CACHE_TTL_SECONDS: "900"
+  NAME_CACHE_NEGATIVE_TTL_SECONDS: "120"
+  NAME_CACHE_MAX_ENTRIES: "10000"
+  # OCI API protection: the limits are not published and throttled calls carry no Retry-After.
+  MAX_LOOKUP_CALLS_PER_INVOCATION: "5"
+  MAX_LOOKUP_SECONDS_PER_INVOCATION: "10"
+
+  # Optional - read the token (AUTH_METHOD=token) or the OAuth client secret (AUTH_METHOD=oauth) from OCI Vault
+  # instead of keeping it in this file. When set, DYNATRACE_API_KEY / OAUTH_CLIENT_SECRET are not used.
+  # DYNATRACE_SECRET_OCID: ocid1.vaultsecret.oc1..aaaa

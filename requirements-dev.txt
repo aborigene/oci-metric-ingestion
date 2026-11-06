@@ -1,2 +1,3 @@
 pytest
 requests
+oci>=2.100.0
