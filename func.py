@@ -6,6 +6,7 @@ import re
 from typing import Dict, List, Optional
 from aggregation import create_minutely_buckets
 from delivery import DeliveryError, send_lines
+from filtering import CompartmentFilter, FilterStats
 from dynatrace_client import DynatraceClient
 from mint import MintMetric
 from summary_stat import SummaryStat
@@ -176,15 +177,24 @@ def handler(ctx, data: io.BytesIO = None):
     # Batch of CloudEvents format, or a single CloudEvent
     items = body if isinstance(body, list) else [body]
 
+    compartment_filter = CompartmentFilter.from_env()
+    filtered = FilterStats()
     lines: List[str] = []
     invalid_items = 0
     for item in items:
         try:
+            if compartment_filter.active:
+                keep, reason = compartment_filter.allows(item.get("compartmentId"))
+                if not keep:
+                    filtered.add(item.get("compartmentId"), reason)
+                    continue
             lines.extend(process_metrics(item))
         except Exception as ex:  # one bad metric must not drop the rest of the batch
             invalid_items += 1
             logging.getLogger().error(f"Skipping metric that could not be processed: {type(ex).__name__}: {ex}")
     logging.getLogger().info(f"parsed: items={len(items)} invalid_items={invalid_items} lines={len(lines)}")
+    if filtered.total:
+        logging.getLogger().info(f"compartment filter: {json.dumps(filtered.summary())}")
 
     if not lines:
         return

@@ -27,3 +27,17 @@ asserts it on every namespace and metric (110 cases).
 - Only the most recent minute of a payload is sent unless `CURATED_SEND_ALL_BUCKETS=true`.
 - `oci_filestorage` `MetadataRequestAverageLatency`: the dimension filter matches on any key, so `operation=WriteMetadata` is reported as `metadata.read.latency` (golden case `#1`).
 - With `IMPORT_ALL_METRICS=true` every namespace, including mapped ones, still goes through the generic path (fixed in a later PR).
+
+---
+
+# Changes in `feat/compartment-filter`
+
+Builds on `fix/delivery-and-auth`. With neither setting configured nothing changes (the golden tests still pass).
+
+| Change | Motivation | Where |
+|---|---|---|
+| `COMPARTMENT_ALLOWLIST` / `COMPARTMENT_DENYLIST` (exact OCID match, deny wins) | A customer with very large non-production compartments wants to leave them out of Dynatrace. Filtering runs before any aggregation, so a skipped metric costs almost nothing, and it applies to curated and generic namespaces. | `filtering.py`, `func.py` `handler` |
+| One summary log line per invocation with skipped counts per compartment | Makes it visible what is being excluded without a log line per metric. | `filtering.py`, `func.py` |
+| Placeholders such as `<Compartment OCIDs>` mean "not set"; values that are not OCIDs are warned about | An unedited `func.yaml` or a typo must not silently drop everything. | `filtering.py` |
+
+Not in this PR: sub-compartment inheritance and tag-based selection. Both need the compartment tree and tags from the OCI Search service, which arrive with the name-enrichment lookup (see the plan in the PR description).

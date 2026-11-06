@@ -17,7 +17,7 @@ def clean_state(monkeypatch):
             "IMPORT_ALL_METRICS", "CURATED_SEND_ALL_BUCKETS", "DRY_RUN", "LOG_LEVEL", "DYNATRACE_TENANT",
             "AUTH_METHOD", "DYNATRACE_API_KEY", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET", "OAUTH_ACCOUNT_URN",
             "PROXY_URL", "PROXY_USERNAME", "PROXY_PASSWORD", "MAX_PAYLOAD_BYTES", "MAX_LINES_PER_REQUEST",
-            "RETRY_BUDGET_SECONDS",
+            "RETRY_BUDGET_SECONDS", "COMPARTMENT_ALLOWLIST", "COMPARTMENT_DENYLIST",
         }:
             monkeypatch.delenv(name)
     dynatrace_client.reset_state()

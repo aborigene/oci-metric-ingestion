@@ -15,6 +15,7 @@
 
 ### Improved in this version:
 
+- New `COMPARTMENT_ALLOWLIST` / `COMPARTMENT_DENYLIST` settings to ingest only the compartments you want. Off by default
 - New `DRY_RUN`, `MAX_PAYLOAD_BYTES`, `MAX_LINES_PER_REQUEST`, `RETRY_BUDGET_SECONDS` and `CURATED_SEND_ALL_BUCKETS` settings
 - The function timeout is now 120 seconds
 - Added a pytest suite (`pip install -r requirements-dev.txt && pytest`)

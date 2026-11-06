@@ -68,6 +68,23 @@ Using an OAuth2 client for the OCI functions will require you to add some additi
 ![alt text](images/oauth/image-8.png)
 10. Finally click on **Create Client** at the bottom of the page and copy the `client_id`, `client_secret` and `urn` for use with the OCI function.  
 
+## Choosing which compartments are ingested
+Large tenancies often contain compartments (dev, QA, ...) that should not be sent to Dynatrace. From cheapest to most flexible:
+
+1. **Scope the connector (recommended first step).** In Connector Hub a Monitoring source lists compartments and, per compartment, the namespaces to read. Metrics from compartments you do not list never reach the function. You can create several connectors that use the same function, for example one per environment. Whether a listed compartment includes its sub-compartments is not documented in the pages we checked, so list sub-compartments explicitly unless you have verified otherwise.
+2. **Allow/deny lists in the function** (this setting). Useful when the connector has to read a compartment tree but only part of it is wanted, and as a safety net.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `COMPARTMENT_ALLOWLIST` | not set | OCIDs separated by commas, semicolons or whitespace. When set, only metrics from these compartments are ingested. |
+| `COMPARTMENT_DENYLIST` | not set | Metrics from these compartments are never ingested. Wins over the allowlist. |
+
+- Matching is on the exact compartment OCID in the metric. Sub-compartments are not included automatically.
+- With neither setting the function ingests everything, exactly as before. Filtering applies to every namespace.
+- A metric without a compartment OCID is skipped when an allowlist is set.
+- Each invocation logs one line such as `compartment filter: {"skipped_items": 12, ...}` listing the compartments that were skipped.
+- All OCI Function configuration values together may not exceed 4 KB, which is roughly 30-40 OCIDs next to the other settings. Use a connector per environment for more.
+
 ## Delivery behaviour and settings
 The function collects every metric in a Connector Hub batch and posts them to Dynatrace in as few requests as possible.
 

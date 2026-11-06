@@ -48,3 +48,10 @@ config:
   # Curated namespaces historically send only the most recent minute of every payload. Set to "true" to send
   # every minute in the payload (more lines, same series, no gaps). See CHANGES.md.
   CURATED_SEND_ALL_BUCKETS: "false"
+
+  # Optional - only ingest metrics from these compartments (comma, semicolon or whitespace separated OCIDs).
+  # Exact match on the compartment OCID in the metric; sub-compartments are NOT included automatically.
+  # COMPARTMENT_ALLOWLIST: ocid1.compartment.oc1..aaaa,ocid1.compartment.oc1..bbbb
+  # Optional - never ingest metrics from these compartments. Takes precedence over COMPARTMENT_ALLOWLIST.
+  # COMPARTMENT_DENYLIST: ocid1.compartment.oc1..cccc
+  # Note: all OCI Function configuration values together are limited to 4 KB (about 30-40 OCIDs).
