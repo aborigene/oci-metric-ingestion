@@ -4,6 +4,11 @@
 
 ### Fixed in this version:
 
+- `IMPORT_ALL_METRICS=true` no longer sends namespaces that have a curated mapping through the generic path; they always keep their curated keys and dimensions. Metrics of a curated namespace that are not in its mapping are skipped (they used to be sent as `cloud.oci.computeagent.*`, which the extension's `cloud.oci.compute*` rules would also match)
+- The generic path sent only `oci.compartment_id` and `oci.resource_group`, so different resources in one compartment merged into one series. It now sends all OCI dimensions, normalised (see the README)
+- A null `resourceGroup` is omitted instead of being written as `"None"` (generic path only)
+- An unmapped namespace is logged once per namespace instead of an ERROR for every metric
+- Only the `oci_` prefix is removed from the namespace in the generic metric key
 - Metrics are now sent in batches (one request per up to 500 lines / 900 KB) instead of one request per datapoint, using a single HTTP session
 - HTTP status codes are checked. 429, 5xx and timeouts are retried with backoff; if they still fail the function now raises so Connector Hub redelivers the batch. Other 4xx responses are logged with their body
 - OAuth tokens are cached and refreshed 60 seconds before they expire (the expiry check was inverted, so a token was requested for every datapoint)

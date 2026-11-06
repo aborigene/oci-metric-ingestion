@@ -23,7 +23,7 @@ Ex: `https://<tenant id>.apps.dynatrace.com` should be `https://<tenant id>.live
     - If you're using token based authentication, set the  value of  `DYNATRACE_API_KEY` to an API token that has the `metrics.ingest` scope.
     - If you're using an OAuth2 Client for authentication change the `AUTH_METHOD` to `oauth` and enter your client_id, client_secret and URN. Please see the "Configuring an OAuth2 Client" section for more details on the requirements.
 ![alt text](images/image-13.png)
-    - Set the configuration option `IMPORT_ALL_METRICS` if you want to import metrics from a namespace that is not supported by the OCI extension. These metrics will not have metadata associated with them.
+    - Set the configuration option `IMPORT_ALL_METRICS` if you want to import metrics from a namespace that is not supported by the OCI extension. These metrics will not have metadata associated with them. See "Namespaces without a curated mapping" below.
 6. Save and exit the text editor. Now deploy the function using the command `fn -v deploy --app <application name>`
 ![alt text](images/image-3.png)
 If the deployment succeeded then you should see the image in your OCI container registry.
@@ -67,6 +67,32 @@ Using an OAuth2 client for the OCI functions will require you to add some additi
 ![alt text](images/oauth/image-7.png)
 ![alt text](images/oauth/image-8.png)
 10. Finally click on **Create Client** at the bottom of the page and copy the `client_id`, `client_secret` and `urn` for use with the OCI function.  
+
+## Namespaces without a curated mapping
+Namespaces that the Dynatrace extension knows (`oci_computeagent`, `oci_lbaas`, `oci_nlb`, `oci_vcn`, `oci_vpn`, `oci_blockstore`, `oci_instancepools`, `oci_filestorage`, `oci_apigateway`, `oci_faas`) always use their curated metric keys and dimensions. Any other namespace is handled as follows:
+
+- `IMPORT_ALL_METRICS=false` (default): the namespace is skipped. This is logged once per namespace.
+- `IMPORT_ALL_METRICS=true`: the namespace is ingested generically.
+
+Generic metrics:
+- **Key:** `cloud.oci.<namespace without "oci_">.<metric name>`, for example `cloud.oci.streaming.PutMessagesLatency.Time`. Characters other than letters, digits, `_`, `.` and `-` in the metric name become `_`.
+- **Value:** one `min/max/sum/count` summary per minute.
+- **Dimensions:** every OCI dimension, plus `cloud.provider=oci` and `oci.service=<namespace without "oci_">`.
+
+| OCI | Dynatrace dimension |
+|---|---|
+| `resourceId` | `oci.resource_id` |
+| `region` | `oci.region` |
+| `compartmentId` | `oci.compartment_id` |
+| `resourceGroup` | `oci.resource_group` |
+| `resourceDisplayName` | `oci.resource_display_name` |
+| any other `fooBar` | `oci.foo_bar` (camelCase becomes snake_case) |
+
+Null, empty and `None` values are omitted. Values are cut at 255 characters, keys at 99. If two OCI dimensions map to the same name the first one wins.
+
+**Dedup warning.** If a namespace is already collected by the Dynatrace extension (via the OCI API), do not also enable it here: both sources would write the same entities and series.
+
+**Key prefix warning.** The extension's topology and OpenPipeline rules match metric keys by prefix (for example `cloud.oci.compute*`). A generic namespace whose name starts with the same prefix, such as `oci_computecontainerinstance`, is matched by the compute rules as well. The function logs a warning once per such namespace.
 
 ## Choosing which compartments are ingested
 Large tenancies often contain compartments (dev, QA, ...) that should not be sent to Dynatrace. From cheapest to most flexible:

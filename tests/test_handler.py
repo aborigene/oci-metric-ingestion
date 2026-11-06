@@ -167,7 +167,8 @@ def test_proxy_password_never_logged(env, session, monkeypatch, caplog):
                                            "https": "http://user:hunter2@proxy.example.com:3128"}
 
 
-def test_import_all_metrics_true_still_works_in_this_pr(env, session, monkeypatch):
+def test_import_all_metrics_true_keeps_curated_namespaces_curated(env, session, monkeypatch):
     monkeypatch.setenv("IMPORT_ALL_METRICS", "true")
     call(CPU)
-    assert b"cloud.oci.computeagent.CpuUtilization" in session.calls[0]["data"]
+    assert session.calls[0]["data"].startswith(b"cloud.oci.compute.cpu.util,")
+    assert b"cloud.oci.computeagent" not in session.calls[0]["data"]

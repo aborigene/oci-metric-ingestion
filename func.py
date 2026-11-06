@@ -4,12 +4,11 @@ import json
 import logging
 import re
 from typing import Dict, List, Optional
-from aggregation import create_minutely_buckets
 from delivery import DeliveryError, send_lines
 from filtering import CompartmentFilter, FilterStats
+from generic import process_generic
 from dynatrace_client import DynatraceClient
 from mint import MintMetric
-from summary_stat import SummaryStat
 from metric_mapping import namespace_map
 from urllib.parse import quote
 
@@ -19,78 +18,70 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default if value is None else value.strip().lower() == "true"
 
 
+_logged_namespaces = set()
+
+
+def _log_skipped_namespace_once(namespace):
+    if namespace not in _logged_namespaces:
+        _logged_namespaces.add(namespace)
+        logging.getLogger().info(
+            f"Skipping namespace '{namespace}': it has no curated mapping. "
+            f"Set IMPORT_ALL_METRICS=true to ingest it with its OCI dimensions."
+        )
+
+
 def process_metrics(body: Dict) -> List[str]:
-    """Turn one OCI Monitoring payload into MINT lines. Nothing is sent from here."""
+    """Turn one OCI Monitoring payload into MINT lines. Nothing is sent from here.
+
+    Routing: a namespace in namespace_map always takes the curated path; any other namespace takes the generic
+    path only when IMPORT_ALL_METRICS is true, otherwise it is skipped (logged once per namespace).
+    """
     logging.getLogger().debug(f"process_metrics: {body}")
 
     namespace = body.get("namespace")
     metric_name = body.get("name")
 
+    datapoints = body.get("datapoints")
+
+    metric_map = namespace_map.get(namespace)
+    if metric_map is None:
+        # No curated mapping for this namespace: ingest it generically only if the user asked for that.
+        if not _env_bool("IMPORT_ALL_METRICS"):
+            _log_skipped_namespace_once(namespace)
+            return []
+        return process_generic(body)
+
+    # Curated namespaces always use the curated path, with or without IMPORT_ALL_METRICS.
     oci_dimensions: Dict[str, str] = dict(body.get("dimensions") or {})
 
     # Include the resourceGroup and compartmentId in oci_dimensions so they can be mapped using the dimension_mapping
     oci_dimensions["resourceGroup"] = body.get("resourceGroup")
     oci_dimensions["compartmentId"] = body.get("compartmentId")
 
-    datapoints = body.get("datapoints")
-
-    import_all_metrics = _env_bool("IMPORT_ALL_METRICS")
-    logging.getLogger().debug(f"import_all_metrics: {import_all_metrics}")
-
     lines: List[str] = []
-    if import_all_metrics:
-        key_namespace = namespace.replace("oci_", "")
-        key = f"cloud.oci.{key_namespace}.{metric_name}"
+    if value_or_none := metric_map.value_from_oci_metric_name(
+        metric_name, oci_dimensions, datapoints
+    ):
+        dynatrace_metric_key, results = value_or_none
+        dimensions = metric_map.dimensions(oci_dimensions)
 
-        buckets = create_minutely_buckets(datapoints)
-        aggregated = {}
-        for timestamp, values in sorted(buckets.items()):
-            aggregated[timestamp] = SummaryStat(
-                min(values), max(values), sum(values), len(values)
-            )
-
-        for timestamp, summary_stat in aggregated.items():
-            mint_metric = MintMetric(
-                key,
-                summary_stat,
-                {
-                    "oci.resource_group": oci_dimensions.get("resourceGroup"),
-                    "oci.compartment_id": oci_dimensions.get("compartmentId"),
-                },
-                timestamp * 1000,
-            )
-            logging.getLogger().debug(f"mint_metric: {mint_metric}")
-            lines.append(str(mint_metric))
+        for result in results:
+            lines.append(str(MintMetric(
+                dynatrace_metric_key,
+                result.value,
+                dimensions,
+                result.timestamp * 1000,
+            )))
+        # Historical behaviour: only the most recent minute of a payload is sent for curated
+        # namespaces. CURATED_SEND_ALL_BUCKETS=true sends every minute (see CHANGES.md).
+        if not _env_bool("CURATED_SEND_ALL_BUCKETS"):
+            lines = lines[-1:]
+        for line in lines:
+            logging.getLogger().debug(f"process_metrics: Mint Metric: {line}")
     else:
-        metric_map = namespace_map.get(namespace)
-        if metric_map is None:
-            logging.getLogger().error(
-                f"Could not find a metric mapping for namespace '{namespace}'"
-            )
-            return lines
-        if value_or_none := metric_map.value_from_oci_metric_name(
-            metric_name, oci_dimensions, datapoints
-        ):
-            dynatrace_metric_key, results = value_or_none
-            dimensions = metric_map.dimensions(oci_dimensions)
-
-            for result in results:
-                lines.append(str(MintMetric(
-                    dynatrace_metric_key,
-                    result.value,
-                    dimensions,
-                    result.timestamp * 1000,
-                )))
-            # Historical behaviour: only the most recent minute of a payload is sent for curated
-            # namespaces. CURATED_SEND_ALL_BUCKETS=true sends every minute (see CHANGES.md).
-            if not _env_bool("CURATED_SEND_ALL_BUCKETS"):
-                lines = lines[-1:]
-            for line in lines:
-                logging.getLogger().debug(f"process_metrics: Mint Metric: {line}")
-        else:
-            logging.getLogger().debug(
-                f"Could not find a mapping for metric '{metric_name}' in namespace '{namespace}'"
-            )
+        logging.getLogger().debug(
+            f"Could not find a mapping for metric '{metric_name}' in namespace '{namespace}'"
+        )
     return lines
 
 

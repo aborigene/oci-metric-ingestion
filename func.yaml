@@ -24,12 +24,14 @@ config:
   PROXY_USERNAME: <Proxy Username>
   # Optional
   PROXY_PASSWORD: <Proxy Password>
-  # Set this to True if you want all metrics pushed by OCI to be ingested into Dynatrace.
-  # This is disabled by default so only metrics that have metadata defined in the 
-  # 'Oracle Cloud Infrastructure' extension will be imported.
-  # If enabled, metrics without metadata will be imported with a metric key matching the following format:
-  # cloud.oci.<oci namespace with the 'oci_' prefix removed>.<metric name>
-  # Ex: "CpuUtilization" from namespace "oci_computeagent" -> "cloud.oci.computeagent.CpuUtilization"  
+  # Set this to True to also ingest namespaces that have no curated mapping in the
+  # 'Oracle Cloud Infrastructure' extension (for example oci_streaming). Namespaces that DO have a mapping always
+  # keep their curated metric keys and dimensions, whatever this is set to.
+  # Unmapped namespaces are ingested with the key cloud.oci.<namespace without 'oci_'>.<metric name>
+  # Ex: "PutMessagesLatency.Time" from "oci_streaming" -> "cloud.oci.streaming.PutMessagesLatency.Time"
+  # and with ALL their OCI dimensions (oci.resource_id, oci.region, oci.compartment_id, oci.resource_group, ...),
+  # plus cloud.provider=oci and oci.service=<namespace without 'oci_'>. See the README.
+  # When False, an unmapped namespace is skipped (logged once per namespace).
   IMPORT_ALL_METRICS: "False"
   # DEBUG logs every payload and MINT line (very verbose). Defaults to INFO when unset.
   LOG_LEVEL: "INFO"

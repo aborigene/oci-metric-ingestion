@@ -41,3 +41,27 @@ Builds on `fix/delivery-and-auth`. With neither setting configured nothing chang
 | Placeholders such as `<Compartment OCIDs>` mean "not set"; values that are not OCIDs are warned about | An unedited `func.yaml` or a typo must not silently drop everything. | `filtering.py` |
 
 Not in this PR: sub-compartment inheritance and tag-based selection. Both need the compartment tree and tags from the OCI Search service, which arrive with the name-enrichment lookup (see the plan in the PR description).
+
+---
+
+# Changes in `feat/generic-path-dimensions`
+
+Builds on `feat/compartment-filter`. The curated path is untouched: the golden tests pass with and without `IMPORT_ALL_METRICS`.
+
+| Change | Motivation | Where |
+|---|---|---|
+| Routing: mapped namespace always curated; unmapped is generic only with `IMPORT_ALL_METRICS=true`, else skipped and logged once | Before, `IMPORT_ALL_METRICS=true` sent every namespace down the generic path and mapped namespaces lost their curated keys and dimensions. | `func.py` |
+| Generic path keeps all OCI dimensions: `resourceId`, `region`, `compartmentId`, `resourceGroup`, `resourceDisplayName` with fixed names, anything else as `oci.<snake_case>`; adds `cloud.provider` and `oci.service` | Before, only compartment and resource group were sent, so several streams in one compartment became one series. A Smartscape node needs `oci.resource_id` and stable names. | `generic.py` |
+| Null, empty and `"None"` values omitted; values cut at 255 chars, keys at 99 | `"None"` must never reach Dynatrace. | `generic.py` |
+| camelCase dimension names become snake_case | `MintMetric` lower-cases keys, so `availabilityDomain` would have become `oci.availabilitydomain` while the curated path uses `oci.availability_domain`. | `generic.py` |
+| Only the `oci_` prefix is stripped from the namespace | `str.replace` removed every occurrence. | `generic.py` |
+| Metric-name characters the API rejects become `_` | A metric name with a space or bracket made the whole line invalid. | `generic.py` |
+| Warning (once per namespace) when a generic key starts with a curated service name | The extension's topology and pipeline rules match metric keys by prefix, so for example `oci_computecontainerinstance` would be treated as compute. The key format is kept as specified; the warning makes the clash visible. | `generic.py` |
+
+## Generic aggregation: checked, no bug
+
+`min/max/sum/count` per minute is unchanged. `count` is the number of datapoints in that minute, not the OCI `count` field (which is ignored). Every minute of a payload is sent (unlike the curated path, see `CURATED_SEND_ALL_BUCKETS`).
+
+## Behaviour change to be aware of
+
+With `IMPORT_ALL_METRICS=true`, users who relied on mapped namespaces appearing as `cloud.oci.<namespace>.*` (for example `cloud.oci.computeagent.CpuUtilization`) will no longer receive those series; they receive the curated keys instead.

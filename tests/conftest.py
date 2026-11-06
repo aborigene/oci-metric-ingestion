@@ -7,6 +7,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
 import dynatrace_client  # noqa: E402
+import func  # noqa: E402
+import generic  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +23,8 @@ def clean_state(monkeypatch):
         }:
             monkeypatch.delenv(name)
     dynatrace_client.reset_state()
+    generic.reset_state()
+    func._logged_namespaces.clear()
     yield
     dynatrace_client.reset_state()
 
