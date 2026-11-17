@@ -609,3 +609,38 @@ def test_enricher_is_created_once_and_keeps_its_memo(monkeypatch):
     enrichment.reset_state()
     first = enrichment.get_enricher()
     assert first is not None and enrichment.get_enricher() is first
+
+
+# ---------- a search that runs but does not return the wanted resources must be visible in the log ----------
+
+def test_complete_search_without_the_wanted_resources_warns(caplog):
+    searcher = FakeSearcher(data={(REGION, q_streams(COMP_A)): [[]]})  # no error, empty answer
+    r, _ = resolver(searcher)
+    with caplog.at_level(logging.INFO):
+        r.resolve([want(S1), want(S2)], [])
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "name lookup" in rec.message]
+    assert len(warnings) == 1
+    message = warnings[0].message
+    assert "returned=0" in message and "wanted=2" in message and "matched=0" in message
+    assert REGION in message and q_streams(COMP_A) in message
+
+
+def test_search_that_finds_everything_logs_info_only(caplog):
+    searcher = FakeSearcher(data={(REGION, q_streams(COMP_A)): [[Item(S1, "one"), Item(S2, "two")]]})
+    r, _ = resolver(searcher)
+    with caplog.at_level(logging.INFO):
+        r.resolve([want(S1), want(S2)], [])
+    records = [rec for rec in caplog.records if "name lookup" in rec.message]
+    assert [rec.levelno for rec in records] == [logging.INFO]
+    assert "returned=2" in records[0].message and "matched=2" in records[0].message
+
+
+def test_negative_cache_hits_are_counted_apart_from_real_hits():
+    searcher = FakeSearcher(data={(REGION, q_streams(COMP_A)): [[Item(S1, "one")]]})
+    r, _ = resolver(searcher)
+    r.resolve([want(S1), want(S2)], [])  # S1 is found, S2 is cached as "not found"
+    r.begin_invocation()
+    r.resolve([want(S1), want(S2)], [])
+    assert r.counters["hits"] == 1
+    assert r.counters["negative_hits"] == 1
+    assert r.counters["calls"] == 0

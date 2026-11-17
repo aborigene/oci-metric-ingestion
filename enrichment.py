@@ -219,8 +219,11 @@ class NameResolver:
         for key, (region, query, ocids) in list(compartment_groups.items()) + list(resource_groups.items()):
             missing = set()
             for ocid in ocids:
-                if self.memo.get((region, ocid))[0]:
+                known, name = self.memo.get((region, ocid))
+                if known and name:
                     self.counters["hits"] += 1
+                elif known:
+                    self.counters["negative_hits"] += 1  # searched recently and not found: not searched again yet
                 else:
                     self.counters["misses"] += 1
                     missing.add(ocid)
@@ -247,6 +250,7 @@ class NameResolver:
                 self.counters["skipped_cap"] += 1
                 return
             found, complete, failed = self._search_all(region, query)
+            self._log_search_result(region, query, wanted, found, complete, failed)
             for ocid, name in found.items():  # ALL returned resources, not only the requested ones
                 self.memo.put((region, ocid), name)
             if complete or failed:
@@ -256,6 +260,22 @@ class NameResolver:
                     self.memo.put((region, ocid), None)
         finally:
             lock.release()
+
+    @staticmethod
+    def _log_search_result(region, query, wanted: set, found: Dict[str, str], complete: bool, failed: bool):
+        """One line per search. A complete search that does not return every wanted resource is a warning:
+        the usual reasons are a missing IAM policy (Search only returns what the caller may see), a wrong
+        query or resource type, or a resource in another compartment or region."""
+        if failed:
+            return  # already counted, and reported with last_error in the summary
+        matched = len(wanted & set(found))
+        message = (f"name lookup: region={region} query={query!r} returned={len(found)} "
+                   f"wanted={len(wanted)} matched={matched} complete={complete}")
+        if complete and matched < len(wanted):
+            logging.getLogger().warning(f"{message}; {len(wanted) - matched} resources not returned by the search, "
+                                        f"their OCIDs are used as names")
+        else:
+            logging.getLogger().info(message)
 
     def _search_all(self, region, query) -> Tuple[Dict[str, str], bool, bool]:
         """Returns (identifier -> name, complete, failed). Every page is one call against the budget."""

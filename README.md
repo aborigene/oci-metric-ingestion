@@ -22,6 +22,7 @@ Policies must also be configured in the OCI tenant to allow the Service Connecto
 Ex: `https://<tenant id>.apps.dynatrace.com` should be `https://<tenant id>.live.dyntrace.com`
     - If you're using token based authentication, set the  value of  `DYNATRACE_API_KEY` to an API token that has the `metrics.ingest` scope.
     - If you're using an OAuth2 Client for authentication change the `AUTH_METHOD` to `oauth` and enter your client_id, client_secret and URN. Please see the "Configuring an OAuth2 Client" section for more details on the requirements.
+    - Recommended: instead of writing the API token or the OAuth client secret in `func.yaml` (where anyone who can read the function configuration can see it), keep it in OCI Vault and set `DYNATRACE_SECRET_OCID`. See "Keeping the Dynatrace secret in OCI Vault" below.
 ![alt text](images/image-13.png)
     - Set the configuration option `IMPORT_ALL_METRICS` if you want to import metrics from a namespace that is not supported by the OCI extension. These metrics will not have metadata associated with them. See "Namespaces without a curated mapping" below.
 6. Save and exit the text editor. Now deploy the function using the command `fn -v deploy --app <application name>`
@@ -104,7 +105,9 @@ OCI metrics carry OCIDs only. For namespaces ingested through `IMPORT_ALL_METRIC
 
 - If the metric already has a `resourceDisplayName`, it is used and the lookup is skipped.
 - The name is looked up **before** the metrics are sent, so it is present from the first metric.
-- When a name cannot be resolved (missing permission, throttling, the circuit breaker is open) the **OCID is used as the name** and a warning with counters (`hits`, `misses`, `calls`, `failures`, `breaker`) is logged. Ingestion is never blocked.
+- When a name cannot be resolved (missing permission, throttling, the circuit breaker is open) the **OCID is used as the name** and a warning with counters (`hits`, `negative_hits`, `misses`, `calls`, `failures`, `breaker`) is logged. Ingestion is never blocked. `negative_hits` are resources that were searched a moment ago and not found (not searched again for `NAME_CACHE_NEGATIVE_TTL_SECONDS`).
+
+Every search also logs one `name lookup: region=… query=… returned=N wanted=M matched=K` line. If a search succeeds but does not return the resources that were asked for, it is a **warning**: OCI Search only returns what the caller may see, so this usually means a missing IAM policy, a wrong query or resource type, or a resource in another compartment or region.
 - Names are dimensions. If a name changes (or is first the OCID and later resolved), the metric continues under a new series for that name. Query by `oci.resource_id` when you need continuity.
 - Curated namespaces are not enriched, their output does not change.
 
@@ -140,13 +143,21 @@ Allow dynamic-group <dynamic group> to use search-resources in tenancy
 ```
 Add one `inspect <resource family> in tenancy` statement per namespace you add to the registry. Search only returns resources the caller may see. If the logs show `NotAuthorizedOrNotFound`, names fall back to OCIDs until the policy is fixed.
 
-For Vault (`DYNATRACE_SECRET_OCID`), also (also unverified):
+The policy for reading the Dynatrace secret from OCI Vault is in the next section.
+
+## Keeping the Dynatrace secret in OCI Vault
+By default the API token (`DYNATRACE_API_KEY`) or OAuth client secret is stored in the function configuration in plain text. To avoid that:
+
+1. In the OCI console create a secret in a Vault (**Identity & Security > Vault > Secrets**). Its content is the API token if `AUTH_METHOD=token`, or the OAuth client secret if `AUTH_METHOD=oauth` (`OAUTH_CLIENT_ID` and `OAUTH_ACCOUNT_URN` stay in `func.yaml`).
+2. Copy the secret OCID and set `DYNATRACE_SECRET_OCID` in `func.yaml` (the line is commented out by default). When it is set, `DYNATRACE_API_KEY` / `OAUTH_CLIENT_SECRET` are not used.
+3. Let the function read it, using the same dynamic group as above (this statement was **not verified against a live tenancy**):
 ```
 Allow dynamic-group <dynamic group> to read secret-bundles in compartment <vault compartment> where target.secret.id = '<secret OCID>'
 ```
-With `AUTH_METHOD=token` the secret content is the API token; with `AUTH_METHOD=oauth` it is the OAuth client secret (`OAUTH_CLIENT_ID` and `OAUTH_ACCOUNT_URN` stay in `func.yaml`). The value is read once, cached, and read again after a 401 (token) or a rejected client secret (OAuth). It is never logged.
 
-### Memory and timeout
+The value is read once, cached, and read again after a 401 (token) or a rejected client secret (OAuth), so rotating the secret needs no redeploy. It is never logged. If the secret cannot be read, a temporary OCI error (throttling, 5xx, timeout) fails the invocation so Connector Hub redelivers the batch, while a permanent one (for example `NotAuthorizedOrNotFound`, usually a missing policy) is logged as an error and the lines are dropped. In both cases the function logs show the cause.
+
+## Memory and timeout
 Name enrichment and Vault use the OCI SDK, so `func.yaml` now sets **512 MB** of memory (it was 256) and a **120 second** timeout. If you deploy with your own settings, keep at least these values.
 
 ## Choosing which compartments are ingested
