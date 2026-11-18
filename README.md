@@ -133,15 +133,44 @@ How lookups stay cheap and safe (the OCI APIs are throttled per tenancy, the lim
 The Search query text and resource type names are not verified against a live tenancy (see "Not verified"). Test one with `oci search resource structured-search --query-text "query stream resources where compartmentId = '<ocid>'"` and fix it through `query` / `resource_type` if needed, no code change is required.
 
 ### IAM policies
-The function authenticates to OCI with its resource principal. Create a dynamic group for the function and policies, for example (adapt names and scopes; these statements are a starting point and were **not verified against a live tenancy**):
+The function authenticates to OCI with its resource principal. Create a dynamic group for the function and policies, for example (adapt names and scopes):
 ```
 Dynamic group:  ALL {resource.type = 'fnfunc', resource.compartment.id = '<function compartment OCID>'}
 
 Allow dynamic-group <dynamic group> to inspect compartments in tenancy
-Allow dynamic-group <dynamic group> to inspect stream-family in tenancy
-Allow dynamic-group <dynamic group> to use search-resources in tenancy
+Allow dynamic-group <dynamic group> to inspect streams in tenancy
 ```
-Add one `inspect <resource family> in tenancy` statement per namespace you add to the registry. Search only returns resources the caller may see. If the logs show `NotAuthorizedOrNotFound`, names fall back to OCIDs until the policy is fixed.
+According to the Oracle documentation ("Details for Search"), the Search service itself needs **no** policy: what a search returns depends on the `inspect` permission the caller has for each resource type (`STREAM_INSPECT` for `streams`, `COMPARTMENT_INSPECT` for `compartments`). Without it Search does **not** fail, it returns no results, and the names fall back to OCIDs. Add one `inspect <resource type> in tenancy` statement per namespace you add to the registry (for a service that does not support `inspect`, Oracle says the `read` verb is used instead).
+
+The statements above follow that documentation but were still **not verified against a live tenancy**. Policies that use `in tenancy` must be created in the root compartment, and with Identity Domains the dynamic group is written `<domain name>/<group name>`. To find out what is missing, look for the log line `name lookup: … returned=0`: it means the search ran and found nothing.
+
+### Permissions for more namespaces: two profiles
+Name enrichment only works for resources the function's dynamic group may `inspect`. When you add namespaces to the registry, choose one of these profiles:
+
+**Minimal (recommended default): one `inspect` statement per resource type you enrich.** The function can only list the metadata of what you named.
+```
+Allow dynamic-group <dynamic group> to inspect compartments in tenancy
+Allow dynamic-group <dynamic group> to inspect streams in tenancy
+Allow dynamic-group <dynamic group> to inspect <resource type> in tenancy      # one per added namespace
+```
+Use `in compartment <name>` instead of `in tenancy` to limit it further.
+
+**Broad: one statement for every resource type, present and future.** No IAM change is needed when a namespace is added.
+```
+Allow dynamic-group <dynamic group> to inspect all-resources in tenancy
+```
+`all-resources` is the aggregate resource type of OCI IAM (see "Policy Syntax" in the Oracle documentation). The function only reads names, but the credential becomes wide: it can list the metadata of everything in the tenancy, which many security teams do not accept. Do not use `read all-resources`, it is far broader than needed. Oracle documents that some services do not recognise `inspect` (for example listing instances needs `read`). For those, Search returns nothing under `inspect`, and you must add a `read` statement for that resource type only.
+
+| Namespace | Search resource type | Permission needed to see it in Search | Status |
+|---|---|---|---|
+| `oci_streaming` | `stream` | `inspect streams` (`STREAM_INSPECT`) | permission documented by Oracle, query not yet verified in a tenancy |
+| (compartment names) | `compartment` | `inspect compartments` (`COMPARTMENT_INSPECT`) | documented by Oracle, not yet verified in a tenancy |
+| any other | — | — | **not verified**, do the check below |
+
+To add a namespace:
+1. Find the resource type and check the query with your own user, for example `oci search resource structured-search --query-text "query <type> resources where compartmentId = '<ocid>'"`.
+2. Add it to `ENRICHMENT_REGISTRY_JSON` (see above) and grant `inspect` (or `read`) for that type to the dynamic group.
+3. Look for the log line `name lookup: … returned=N wanted=M matched=K`. `returned=0` means the search ran and found nothing: almost always a missing permission or a wrong query.
 
 The policy for reading the Dynatrace secret from OCI Vault is in the next section.
 
@@ -194,6 +223,110 @@ Errors are handled as follows. Connector Hub delivers at-least-once and does not
 - Other 4xx responses (for example a rejected line or a wrong token) are logged with the status and response body, and are not retried.
 
 The function timeout is set to 120 seconds in `func.yaml`.
+
+## Advanced: deploying without `fn deploy` (restricted networks)
+`fn deploy` builds the image where you run it, which needs access to Docker Hub (the `fnproject` base images), PyPI and the registry. If your network blocks that and the build fails, build the image yourself and create the function in the console. Nothing in the function code changes; only how the image gets to OCI and where the configuration lives.
+
+> The Dockerfile below is the one that was used and worked in a restricted corporate network (Brazil, `GENERIC_ARM`); only the customer-specific proxy values were replaced by placeholders. Your base-image mirror, proxy and certificate setup may differ.
+
+Do **not** name the file `Dockerfile` inside this folder: `fn deploy` would then use it instead of `func.yaml`. Name it `Dockerfile.manual` and keep it in this folder (next to `func.py` and `requirements.txt`), because the build copies the whole folder.
+
+### 1. Dockerfile.manual
+```dockerfile
+# Dockerfile.manual
+FROM fnproject/python:3.11-dev AS build-stage
+
+# Only if the build must go through a proxy. These variables exist in the build stage only;
+# the final image starts from a clean base and does not contain them.
+# ENV http_proxy=http://<proxy host>:<port>
+# ENV https_proxy=http://<proxy host>:<port>
+
+# Only if a TLS-intercepting proxy breaks certificate checks for PyPI. This disables
+# the check for these hosts, so prefer installing your corporate CA certificate instead.
+# Set both hosts in one command: a second `pip config set global.trusted-host` replaces the first.
+# RUN pip config set global.trusted-host "pypi.org files.pythonhosted.org"
+
+WORKDIR /function
+
+COPY requirements.txt .
+
+RUN pip install \
+    --target /python \
+    --no-cache-dir \
+    -r requirements.txt
+
+COPY . .
+
+FROM fnproject/python:3.11
+
+WORKDIR /function
+
+COPY --from=build-stage /python /python
+COPY --from=build-stage /function /function
+
+ENV PYTHONPATH=/function:/python
+
+ENTRYPOINT ["/python/bin/fdk", "/function/func.py", "handler"]
+```
+- If Docker Hub is blocked, replace both `fnproject/python` references with your internal mirror of the same images (`3.11-dev` for the build stage, `3.11` for the final one).
+- The final stage must keep `PYTHONPATH` and the `ENTRYPOINT`: the `fdk` runtime is installed into `/python` by `requirements.txt`.
+- Add a `.dockerignore` with `tests/`, `images/`, `.git/` and `*.md` for a smaller image.
+
+### 2. Build, tag and push with Podman
+The application shape in this guide is `GENERIC_ARM`, so build for `linux/arm64` (on an x86 machine this needs QEMU emulation; Apple silicon builds it natively). If your application uses `GENERIC_X86`, use `linux/amd64`.
+```bash
+# Region key of the OCIR endpoint: gru = Sao Paulo, iad = Ashburn, fra = Frankfurt (see the Oracle documentation for others)
+export REGION_KEY=gru
+export TENANCY_NAMESPACE=<tenancy namespace>      # Tenancy details page, "Object storage namespace"
+export REPO=<repository name>
+export VERSION=0.2.0
+
+# run from this folder; the final dot is the build context
+podman build --platform linux/arm64 -f Dockerfile.manual -t oci-metric-ingestion:$VERSION .
+
+# user: <tenancy namespace>/<username>  (with a non-default Identity Domain: <tenancy namespace>/<domain>/<username>)
+# password: an OCI auth token, not the console password
+podman login ${REGION_KEY}.ocir.io
+
+podman tag  oci-metric-ingestion:$VERSION ${REGION_KEY}.ocir.io/${TENANCY_NAMESPACE}/${REPO}/oci-metric-ingestion:$VERSION
+podman push ${REGION_KEY}.ocir.io/${TENANCY_NAMESPACE}/${REPO}/oci-metric-ingestion:$VERSION
+```
+Use a new tag (or the version number) for every build. Re-pushing the same tag may not make the function pick up the new image.
+
+### 3. Create the function in the console
+1. **Developer Services > Functions > Applications**, open the application (shape `GENERIC_ARM`, as in "Setup the Application").
+2. **Functions > Create function**, and choose the option that uses an existing image from the registry (the wording changes between console versions). Select the image and tag you pushed.
+3. Set **Memory 512 MB** and **Timeout 120 seconds**. These are the values in `func.yaml`; the OCI SDK needs the memory.
+4. If the function fails to start with an image pull error, the service may lack permission to read the repository. Oracle documents a policy for the Functions service to read repositories; check its current wording ("Creating Policies to Control Access to Network and Function-Related Resources") and make sure the repository is in a compartment the policy covers. This was not verified here.
+
+### 4. Set the configuration in the console
+With `fn deploy` the settings come from `func.yaml`. When you create the function by hand, `func.yaml` is **not read at all**: open the function, **Configuration**, and add each key and value. Remember:
+- Every value is plain text: write `true` / `false` and numbers as they are, without quotes, in the console field.
+- Add only the keys you need; every other key has a default. Do **not** add the `<…>` placeholders from `func.yaml`.
+- All values together are limited to 4 KB.
+
+| Key | Needed | Value |
+|---|---|---|
+| `DYNATRACE_TENANT` | yes | Tenant URL (see "Setup the Application", step 5) |
+| `AUTH_METHOD` | yes | `token` or `oauth` |
+| `DYNATRACE_API_KEY` | `token`, unless Vault is used | API token with `metrics.ingest` |
+| `OAUTH_CLIENT_ID`, `OAUTH_ACCOUNT_URN` | `oauth` | from the OAuth client |
+| `OAUTH_CLIENT_SECRET` | `oauth`, unless Vault is used | the client secret |
+| `DYNATRACE_SECRET_OCID` | recommended | OCID of the Vault secret; replaces the two secret keys above (see "Keeping the Dynatrace secret in OCI Vault") |
+| `IMPORT_ALL_METRICS` | for streaming | `true` |
+| `ENRICH_NAMES` | optional | `true` (default) or `false` |
+| `COMPARTMENT_ALLOWLIST`, `COMPARTMENT_DENYLIST` | optional | OCIDs, see "Choosing which compartments are ingested" |
+| `ENRICHMENT_REGISTRY_JSON` | optional | JSON, see "Names for resources and compartments" |
+| `PROXY_URL`, `PROXY_USERNAME`, `PROXY_PASSWORD` | optional | only if a proxy is required |
+| `DRY_RUN` | for the first test | `true` logs the lines instead of sending them; remove it or set `false` afterwards |
+| `LOG_LEVEL` | optional | `INFO` (default) or `DEBUG` |
+
+The delivery and cache settings (`MAX_PAYLOAD_BYTES`, `RETRY_BUDGET_SECONDS`, `NAME_CACHE_*`, `MAX_LOOKUP_*`, …) are optional; see `func.yaml` for their meaning and defaults.
+
+Anyone with access to the function in the console can read these values. Use `DYNATRACE_SECRET_OCID` for the token or client secret.
+
+### 5. Updating the function later
+Build and push a new tag, then change the image of the function in the console (**Edit**), and keep the configuration. The Connector Hub connector does not need to change.
 
 ## Running the tests
 ```
