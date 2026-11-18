@@ -1,0 +1,33 @@
+FROM fnproject/python:3.11-dev as build-stage
+
+# PROXY: if the build network only reaches the internet through a proxy, uncomment
+# the two lines below and replace <proxy host>:<port> with your proxy address
+# (add user:password@ before the host if the proxy requires authentication).
+# They apply to this build stage only (pip downloads); the final image does not contain them.
+# Without a proxy, leave them commented.
+# ENV http_proxy=http://<proxy host>:<port>
+# ENV https_proxy=http://<proxy host>:<port>
+
+RUN pip config set global.trusted-host "pypi.org files.pythonhosted.org"
+
+WORKDIR /function
+
+COPY requirements.txt .
+
+RUN pip install \
+    --target /python \
+    --no-cache-dir \
+    -r requirements.txt
+
+COPY . .
+
+FROM fnproject/python:3.11
+
+WORKDIR /function
+
+COPY --from=build-stage /python /python
+COPY --from=build-stage /function /function
+
+ENV PYTHONPATH=/function:/python
+
+ENTRYPOINT ["/python/bin/fdk", "/function/func.py", "handler"]
